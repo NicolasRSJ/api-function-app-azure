@@ -2,9 +2,18 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
+
+# Virtual env
+.venv/
+venv/
 
 # Azure Functions
 local.settings.json
+.python_packages/
+.local/
+bin/
+obj/
 
 # Distribution / packaging
 .Python
@@ -25,6 +34,9 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# Config local
+local.settings.json
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
