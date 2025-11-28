@@ -1,7 +1,14 @@
 import azure.functions as func
 import logging
 import json
+import os
+import pyodbc
 from typing import Dict, Any
+
+SQL_CONN_STR = os.getenv("SQL_CONNECTION_STRING")
+
+def get_conn():
+    return pyodbc.connect(SQL_CONN_STR)
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -16,37 +23,78 @@ def imprimir_titulo(titulo: str):
 
 
 def listar_usuarios():
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, nome, idade, email, cidade FROM Usuarios")
+        rows = cursor.fetchall()
+
+        usuarios = []
+        for r in rows:
+            usuarios.append({
+                "id": r.id,
+                "nome": r.nome,
+                "idade": r.idade,
+                "email": r.email,
+                "cidade": r.cidade,
+            })
+
     return {
         "status_code": 200,
-        "corpo": list(USUARIOS.values()),
+        "corpo": usuarios,
     }
 
 
 def obter_usuario(usuario_id: int):
-    usuario = USUARIOS.get(usuario_id)
-    if usuario is None:
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, nome, idade, email, cidade FROM Usuarios WHERE id = ?",
+            (usuario_id,)
+        )
+        row = cursor.fetchone()
+
+    if not row:
         return {
             "status_code": 404,
             "corpo": f"Usuário {usuario_id} não encontrado",
         }
+
+    usuario = {
+        "id": row.id,
+        "nome": row.nome,
+        "idade": row.idade,
+        "email": row.email,
+        "cidade": row.cidade,
+    }
+
     return {
         "status_code": 200,
         "corpo": usuario,
     }
 
 
+
 def criar_usuario(nome: str, idade: int, email: str, cidade: str | None = None):
-    global PROX_ID
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO Usuarios (nome, idade, email, cidade)
+            OUTPUT INSERTED.id, INSERTED.nome, INSERTED.idade, INSERTED.email, INSERTED.cidade
+            VALUES (?, ?, ?, ?)
+            """,
+            (nome, idade, email, cidade)
+        )
+        row = cursor.fetchone()
+        conn.commit()
 
     usuario = {
-        "id": PROX_ID,
-        "nome": nome,
-        "idade": idade,
-        "email": email,
-        "cidade": cidade,
+        "id": row.id,
+        "nome": row.nome,
+        "idade": row.idade,
+        "email": row.email,
+        "cidade": row.cidade,
     }
-    USUARIOS[PROX_ID] = usuario
-    PROX_ID += 1
 
     return {
         "status_code": 201,
@@ -61,36 +109,63 @@ def atualizar_usuario(
     email: str | None = None,
     cidade: str | None = None,
 ):
-    usuario = USUARIOS.get(usuario_id)
-    if usuario is None:
-        return {
-            "status_code": 404,
-            "corpo": f"Usuário {usuario_id} não encontrado",
-        }
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, nome, idade, email, cidade FROM Usuarios WHERE id = ?",
+            (usuario_id,)
+        )
+        row = cursor.fetchone()
 
-    if nome is not None:
-        usuario["nome"] = nome
-    if idade is not None:
-        usuario["idade"] = idade
-    if email is not None:
-        usuario["email"] = email
-    if cidade is not None:
-        usuario["cidade"] = cidade
+        if not row:
+            return {
+                "status_code": 404,
+                "corpo": f"Usuário {usuario_id} não encontrado",
+            }
+
+        novo_nome = nome if nome is not None else row.nome
+        nova_idade = idade if idade is not None else row.idade
+        novo_email = email if email is not None else row.email
+        nova_cidade = cidade if cidade is not None else row.cidade
+
+        cursor.execute(
+            """
+            UPDATE Usuarios
+            SET nome = ?, idade = ?, email = ?, cidade = ?
+            WHERE id = ?
+            """,
+            (novo_nome, nova_idade, novo_email, nova_cidade, usuario_id)
+        )
+        conn.commit()
 
     return {
         "status_code": 200,
-        "corpo": usuario,
+        "corpo": {
+            "id": usuario_id,
+            "nome": novo_nome,
+            "idade": nova_idade,
+            "email": novo_email,
+            "cidade": nova_cidade,
+        },
     }
 
 
 def remover_usuario(usuario_id: int):
-    if usuario_id not in USUARIOS:
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM Usuarios WHERE id = ?",
+            (usuario_id,)
+        )
+        linhas = cursor.rowcount
+        conn.commit()
+
+    if linhas == 0:
         return {
             "status_code": 404,
             "corpo": f"Usuário {usuario_id} não encontrado",
         }
 
-    del USUARIOS[usuario_id]
     return {
         "status_code": 200,
         "corpo": f"Usuário {usuario_id} removido com sucesso",
@@ -117,10 +192,19 @@ def _http_from_result(resultado: dict) -> func.HttpResponse:
 
 @app.route(route="usuarios", methods=["GET", "POST"])
 def http_usuarios(req: func.HttpRequest) -> func.HttpResponse:
+
     if req.method == "GET":
         imprimir_titulo("Listando usuários via Azure Function")
-        resultado = listar_usuarios()
-        return _http_from_result(resultado)
+        try:
+            resultado = listar_usuarios()
+            return _http_from_result(resultado)
+        except Exception as e:
+            logging.exception("Erro ao listar usuários")
+            return func.HttpResponse(
+                f"Erro ao listar usuários: {e}",
+                status_code=500,
+                mimetype="text/plain; charset=utf-8",
+            )
 
     if req.method == "POST":
         try:
@@ -143,8 +227,16 @@ def http_usuarios(req: func.HttpRequest) -> func.HttpResponse:
             )
 
         imprimir_titulo("Criando usuário via Azure Function")
-        resultado = criar_usuario(nome, idade, email, cidade)
-        return _http_from_result(resultado)
+        try:
+            resultado = criar_usuario(nome, idade, email, cidade)
+            return _http_from_result(resultado)
+        except Exception as e:
+            logging.exception("Erro ao criar usuário")
+            return func.HttpResponse(
+                f"Erro ao criar usuário: {e}",
+                status_code=500,
+                mimetype="text/plain; charset=utf-8",
+            )
 
 
 @app.route(route="usuarios/{usuario_id}", methods=["GET", "PUT", "DELETE"])
